@@ -5,7 +5,7 @@ This script is meant to mimic the df.profile_report() function from the pandas_p
 
 The function will report the following for all variables:<br/>
   -Missingness<br/>
-  -Mean / median / variation<br/>
+  -Mean / median / variance<br/>
   -Potential outliers<br/>
   -Percent of unique values<br/>
   -Percent of values equal to 0<br/>
