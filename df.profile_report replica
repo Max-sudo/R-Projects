@@ -1,0 +1,104 @@
+---
+title: "DF.Profile_Report() Replica"
+author: "Max Fairbairn"
+date: "7/29/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This script creates a function to mimic the df.profile_report() function in python.
+It will:
+  -Report highly correlated variables
+  -Report variables with many missing values
+  -Report variables with many missing zeros
+  -Plot histograms of each variable to view distribution
+
+Libraries
+```{r}
+library(dplyr)
+library(ggplot2)
+library(kableExtra)
+library(plotrix)
+```
+
+Create some fake data
+```{r}
+tib <- tibble(V1 = c(rep(0, 80), rep(c(1,2,3,4,5), 4)),
+              V2 = rnorm(100),
+              V3 = c(rep(NA, 80), rnorm(10, mean = 1, sd = 5) + seq(1:10), seq(1:9), 200),
+              V4 = c(rep(NA, 15), rnorm(50, mean = 1, sd = 5) + seq(2:51), seq(2:36)))
+tib
+```
+
+Profile Report Function: Takes a dataframe and type
+  -type takes values "table" or "graphs"
+      > Table returns only table of summary statistics
+      > Graphs returns summary statistics with histogram of each variable's distribution
+      
+```{r}
+profile_report <- function(df, type) {
+  
+  #Correlation
+  cors <- cor(df)
+  
+  #Missingness, mean, sd, uniques, zeros, and # of outliers
+  missing_count <-paste("Percent missing: ", paste((100 * sapply(df, function(x) sum(is.na(x))) / nrow(df)), "%", sep = ""))
+  means <- paste("Mean: ", sapply(df, function(x) round(mean(na.omit(x)), 2)))
+  std_devs <- paste("Std. Deviation: ", sapply(df, function(x) round(sd(na.omit(x)), 2)))
+  unique_percent <- paste("Percent unique: ", paste(100 * sapply(df, function(x) round(length(unique(x)) / length(x), 2)), "%", sep = ""))
+  zeros <- paste("Percent zero: ", paste((100 * sapply(df, function(x) round(sum(na.omit(x) == 1) / nrow(df), 2))), "%", sep = ""))
+  outliers <- paste("Number of outliers (+/- 3 sd): ", sapply(df, function(x) sum(na.omit(x) > (mean(na.omit(x)) + (3*sd(na.omit(x))))) + sum(na.omit(x) < (mean(na.omit(x)) - (3*sd(na.omit(x)))))))
+  summary_statistics <- paste(missing_count,"\n",means,"\n",std_devs,"\n",unique_percent,"\n",zeros,"\n",outliers)
+  
+  ######---For: type = graphs---######
+  if (type == "graphs") {
+  for(i in 1:ncol(df)) {
+  his <- hist(df[[i]], 
+              main = colnames(df[,i]),
+              xlab = paste("Values of", colnames(df[,i])),
+              col = "light blue",
+              breaks = 30)
+  textbox(x = c(min(na.omit(df[[i]])),max(na.omit(df[[i]]))),
+        y = max(his$counts),
+        justify = "r",
+        textlist = summary_statistics[i],
+        box = F,
+        cex = 0.8)
+  #mtext(summary_statistics[i], side = 4, outer = T, adj = 0, las = 3)
+  }
+  }
+  
+  ######---For: type = table---#####
+  if (type == "table") {
+    #Create tibble of stats and percentages
+    summary_table <- tibble(Variable = colnames(df),
+                          `Percent Missing` = paste((100 * sapply(df, function(x) sum(is.na(x))) / nrow(df)),"%",sep=""),
+                          `Percent Zeros` = paste((100 * sapply(df, function(x) round(sum(na.omit(x) == 1) / nrow(df), 2))),"%",sep=""),
+                          `Percent Unique` = paste((100 * sapply(df, function(x) round(length(unique(x)) / length(x), 2))),"%", sep = ""),
+                          Mean = sapply(df, function(x) round(mean(na.omit(x)), 2)),
+                          StdDeviation = sapply(df, function(x) round(sd(na.omit(x)), 2)))
+    #Conditional coloring
+    summary_table <- summary_table %>%
+      mutate(
+        `Percent Missing` = cell_spec(`Percent Missing`, "html", 
+                                      color = ifelse(`Percent Missing` > 10,"red","green")),
+        `Percent Zeros` = cell_spec(`Percent Zeros`, "html", 
+                                      color = ifelse(`Percent Zeros` > 10,"red","green")),
+        `Percent Unique` = cell_spec(`Percent Unique`, "html", 
+                                      color = "green"),
+        Mean = cell_spec(Mean, "html", color = "green"),
+        StdDeviation = cell_spec(StdDeviation, "html", color = "green"),
+        Variable = cell_spec(Variable, "html", bold = T))
+    
+    #Create table
+    kable(summary_table, escape = F) %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = F,
+                fixed_thead = T)
+  }
+}
+graph_report <- profile_report(tib, type = "graphs")
+table_report <- profile_report(tib, type = "table")
