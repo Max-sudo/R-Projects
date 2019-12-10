@@ -3,7 +3,7 @@ Personal Projects Done in R
 
 This script is meant to mimic the df.profile_report() function from the pandas_profiling package in python. 
 
-The function will report:
+The function will report the following for all variables:
   -Missingness
   -Mean / median / variation
   -Potential outliers
