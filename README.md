@@ -11,4 +11,4 @@ The function will report the following for all variables:<br/>
   -Percent of values equal to 0<br/>
   -Histogram of variable distributions<br/>
   
-In the future, a correlation report will also be added.
+Correlation report to be added soon, stay tuned!
