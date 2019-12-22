@@ -1,7 +1,7 @@
 # R-Projects
 Personal projects done in R
 
-1) df.profile_report():
+1) df.profile_report replica:
 
     This script is meant to mimic the df.profile_report() function from the pandas_profiling package in python. 
 
