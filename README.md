@@ -3,7 +3,7 @@ Personal projects done in R
 
 1) Classification comparison - HR Analytics:
     
-    In this project, performance of the following classification models was compared on original and undersampled versions of the HR Analytics data set, with the goal of modeling which individuals were most liekly to be promoted within an organization:<br/>
+    In this project, performance of the following classification models was compared on original and undersampled versions of the HR Analytics data set, with the goal of modeling which individuals were most likely to be promoted within an organization:<br/>
         -Logistic Regression<br/>
         -Random Forest<br/>
         -XGBoost<br/>
