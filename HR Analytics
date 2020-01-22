@@ -1,0 +1,613 @@
+---
+title: "Code Compilation"
+author: "Max Fairbairn"
+date: "4/25/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Classification for HR: Identify employees likely to be promoted with KNN
+Libraries
+```{r, quietly = T, warning=F, message=F}
+library(tidyverse)
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(kernlab)
+library(tree)
+library(randomForest)
+library(gbm)
+library(rpart)
+library(rpart.plot)
+library(rattle)
+library(party)
+library(partykit)
+library(viridis)
+library(class)
+library(caret)
+```
+
+Load Dataset
+```{r}
+#Load HR & HR.TEST
+HR <- read_csv("hr_analytics.csv")
+HR.TEST <- read_csv("hr_analytics_test.csv")
+
+#Reorder columns and rename
+HR <- HR %>%
+  dplyr::select(is_promoted, everything()) %>%
+  rename("KIPs_met..80." = "KPIs_met >80%")
+```
+#EDA
+
+EDA for HR (KPIs.met == 1)
+```{r}
+KPI_met_criteria <- (HR$KIPs_met..80.==1) #Find those meeting 80
+HR.K <- HR[KPI_met_criteria,] #Subset for met criteria
+HR.K2 <- HR.K[,-c(2,which(colnames(HR) == colnames(HR)[12]))]
+
+#Plot avg training score and length of service
+ggplot(HR.K2) + geom_point(aes(x = avg_training_score, y = length_of_service, color = is_promoted), alpha = 0.3) + facet_wrap(~previous_year_rating)
+
+#Plot previous_year_rating and length of service
+ggplot(HR.K2) + geom_point(aes(x = previous_year_rating, y = length_of_service, color = is_promoted), alpha = 0.3) + facet_wrap(~department)
+
+#Plot length of service and avg training score
+ggplot(HR) + geom_point(aes(x = length_of_service, y = avg_training_score, color = as.logical(is_promoted)), alpha = 0.3) + facet_wrap(~previous_year_rating)
+
+#Plot age and length of service
+ggplot(HR) + geom_point(aes(x = age, y = length_of_service, color = is_promoted), alpha = 0.3) + facet_wrap(~recruitment_channel) 
+
+#Group by recuitment channel and whether promoted or not
+hr.1 <- HR %>%
+  group_by(recruitment_channel, is_promoted) %>%
+  summarise(n = n())
+```
+Intuitively, I expect 'previous_year_rating', 'length_of_service','avg_training_score', 'KPIs_met..80.', 'awards_won', 'education' to be significant predictor variables
+
+
+Make Model.Matrices
+```{r}
+#Create model matrices and eliminate NA's for ease of comparison
+HR1.1 <- as_tibble(model.matrix(~., model.frame(~., data = HR, na.action = NULL))[,-1])
+HR1.2 <- as_tibble(scale(HR1.1[,-1], center = T, scale = T))
+HR1.2$is_promoted <- HR$is_promoted
+HR2 <- na.omit(HR1.2) %>%
+  select(is_promoted, everything())
+
+HR.TEST1.1 <- as_tibble(model.matrix(~., model.frame(~., data = HR.TEST, na.action = NULL))[,-1])
+HR.TEST1.2 <- as_tibble(scale(HR.TEST1.1[,-1], center = T, scale = T))
+HR.TEST1.2$is_promoted <- HR.TEST$is_promoted
+HR.TEST2 <- na.omit(HR.TEST1.2)
+```
+
+###---Perform KNN on HR2---###
+
+Create train and test sets from HR2
+```{r}
+set.seed(273)
+index <- sample(1:nrow(HR2), floor(0.8*nrow(HR2)), replace = F)
+
+#Create train and test sets and remove 'is_promoted' and 'employee_id' variables
+K.TRAIN <- HR2[index,-c(1:2, length(HR2))]
+K.TEST <- HR2[-index, -c(1:2, length(HR2))]
+
+#Initiate list for knn_models that are created
+K.MODELS <- list()
+```
+
+Create K models
+```{r}
+#Loop though 1-10, creating 10 models with incrementing values for k
+for(i in 1:10) {
+  K.MODELS[[i]] <- knn(K.TRAIN, K.TEST, cl = HR2$is_promoted[index], k = i)
+}
+```
+
+Confusion Matrix Code
+```{r}
+# Sidebar: A helper function to give the `confusion matrix', specificity and sensitivity
+# caret package does this but the function can be buggy.
+
+confusion <- function(yhat, y, quietly = FALSE){
+  
+  if(!quietly)
+    message("yhat is the vector of predicted outcomes, possibly a factor.\n
+          Sensitivity = (first level predicted) / (first level actual) \n
+          Specificity = (second level predicted) / (second level actual)")
+  
+  if(!is.factor(y) & is.factor(yhat))
+    y <- as.factor(y)
+  
+  if(!all.equal(levels(yhat), levels(y)))
+    stop("Factor levels of yhat and y do not match.")
+  
+  confusion_mat <- table(yhat, y, deparse.level = 2)
+  stats <- data.frame(sensitivity = confusion_mat[1, 1]/sum(confusion_mat[, 1]),
+                                 specificity = confusion_mat[2, 2]/sum(confusion_mat[, 2]))
+  
+  return(list(confusion_mat = confusion_mat, stats = stats))
+}
+```
+
+Create results dfs
+```{r}
+#Get confusion matrix for k models
+K1.RESULTS <- lapply(K.MODELS, FUN = function(x) {
+  return(confusion(x, HR2[-index,]$is_promoted, quietly = TRUE)$stats)
+})
+
+#Bind results
+K1.RESULTS <- bind_rows(K1.RESULTS)
+K1.RESULTS$K <- 1:10
+k.num = 10
+
+#Plot specificity and sensitivity
+ggplot(K1.RESULTS, aes(x = specificity, y = sensitivity, label = k.num)) + geom_point() + geom_text(hjust = 2)
+```
+
+Get F1 Scores
+```{r}
+#Function to get F1 scores
+f1.scores <- function(models, test_data, n, positive_case) {
+  f.scores <- list()
+  y <- as.factor(test_data)
+for(i in 1:n) {
+  predictions <- models[[i]]
+
+  precision <- posPredValue(predictions, y, positive=positive_case)
+  recall <- sensitivity(predictions, y, positive=positive_case)
+
+  f.scores[[i]] <- (2 * precision * recall) / (precision + recall)
+}
+  f.scores
+}
+```
+
+Get F1 scores for K models
+```{r}
+positive.case <- K.MODELS[[1]][which(K.MODELS[[1]] != 0)[1]]
+BEST.K <- which.max(f1.scores(K.MODELS, HR2[-index,]$is_promoted, 10, positive.case))
+f1.scores(K.MODELS, HR2[-index,]$is_promoted, 10, positive.case)
+```
+
+The highest reported F1 score was 0.018 (Very, very poor performance)
+
+###---Classification for HR: Identify employees likely to be promoted with SVM---###
+
+Create train and test
+```{r}
+#Only using a select number of columns for computing capicty reasons
+cols <- c("is_promoted", "previous_year_rating", "length_of_service", "avg_training_score", "awards_won?")
+
+#Create train and test
+svm.index <- sample(1:nrow(HR), floor(0.8*nrow(HR)))
+svm.train <- HR[svm.index,cols]
+svm.test <- HR[-svm.index, cols]
+```
+
+SVM Preprocessing
+```{r}
+#Make Imputed matrices
+svm.train1.2 <- as_tibble(model.matrix(~., model.frame(~., data = svm.train, na.action = NULL))[,-1]) #Model matrix
+
+svm.train1.2$is_promoted = as.factor(svm.train1.2$is_promoted) #Convert is promoted to factor
+
+svm.train1.4 <- svm.train1.2 %>% #Reorder
+  dplyr::select(is_promoted, everything()) 
+
+svm.train1.5 <- svm.train1.4[,-c(length(svm.train1.4))]#Drop final column
+
+#Repeat above on test
+svm.test1.2 <- as.tibble(model.matrix(~., model.frame(~., data = svm.test, na.action = NULL))[,-1])
+svm.test1.2$is_promoted <- as.factor(svm.test1.2$is_promoted)
+svm.test1.4 <- svm.test1.2 %>%
+  dplyr::select(is_promoted, everything())
+svm.test1.4
+svm.test1.5 <- svm.test1.4[,-c(length(svm.test1.4))]
+```
+
+SVM With Caret
+```{r}
+set.seed(273) 
+
+trctrl <- trainControl(method = "cv", number = 5) #Determine model specifics
+
+#Linear
+svm_Linear <- train(as.factor(is_promoted) ~ department + log(avg_training_score) + department * avg_training_score, data = HR.both.train,
+                 method ="svmLinear",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 10)
+#Radial
+svm_Radial <- train(as.factor(is_promoted) ~ department + log(avg_training_score) + department * avg_training_score, data = HR.both.train,
+                 method ="svmRadial",
+                 trControl=trctrl,
+                 preProcess = c("center", "scale"),
+                 tuneLength = 10)
+```
+
+Score models
+```{r}
+svm.pred <- predict(svm_Linear, newdata = HR.both.test3) #Predict linear
+svm.pred.fac <- as.factor(svm.pred) #Convert to factor
+
+svm.table <- as.tibble(cbind(svm.pred.fac, as.factor(HR.both.test3$is_promoted))) %>%  #View as table
+  rename(test = V2)
+
+svm.table <- svm.table %>% #Convert to numeric
+  mutate(Predictions = ifelse(svm.pred.fac == 1,"0", "1"), Test = ifelse(test == 1,"0","1"))
+
+svm.table$Pred2 <- factor(svm.table$Predictions) #Make factors
+svm.table$Test2 <- factor(svm.table$Test)
+
+svm.table <- svm.table %>% dplyr::select(Pred2, Test2)
+
+#Get F1 score
+precision <- posPredValue(svm.table$Pred2, factor(svm.table$Test2), positive="1")
+recall <- sensitivity(svm.table$Pred2, factor(svm.table$Test2), positive="1")
+
+F1 <- (2 * precision * recall) / (precision + recall)
+```
+
+Use grid to try different values of C (cost)
+```{r}
+grid <- expand.grid(C = c(0,0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 5,10))
+svm_Linear_Grid <- train(is_promoted ~., data = svm.train1.5, method = "svmLinear",
+                    trControl=trctrl,
+                    preProcess = c("center", "scale"),
+                    tuneGrid = grid,
+                    tuneLength = 10)
+```
+Undersampled: F1 ~ 0.3463
+Oversampled: F1 ~ 0.2833
+Full dataset: F1 ~ 0.2758
+
+##Classification for HR: Identify employees likely to be promoted with Logistic Regression
+
+Undersampled data set
+```{r}
+set.seed(273)
+
+#Create 2 sets: one with only 1s and one with only 0s
+HR.one <- na.omit(HR[HR$is_promoted == 1,])
+HR.null <- na.omit(HR[HR$is_promoted == 0,])
+under <- sample(nrow(HR.null), size = nrow(HR.one), replace = F)
+
+#Create complete training set by combing the 1s with a sample of the same size from 0s. 
+HR.both <- rbind(HR.one, HR.null[under,])
+both.sample <- sample(nrow(HR.both), floor(0.5 * nrow(HR.both)), replace = F)
+HR.both.train <- HR.both[both.sample,]
+HR.both.test <- HR.both[-both.sample,]
+
+HR.both.test3 <- rbind(HR.both[-both.sample,], HR.null[-under,])
+zeroes <- 26189 #Number of zeroes
+HR.zero.hold <- HR.both.test3[HR.both.test3$is_promoted == 0,]
+zero.index <- sample(nrow(HR.zero.hold), size = zeroes, replace = F)
+HR.both.test3 <- rbind(HR.both.test3[HR.both.test3$is_promoted == 1,],HR.zero.hold[zero.index,]) #Create final dataset to model with
+```
+
+Logistic - Undersampled Dataset
+```{r}
+set.seed(273)
+
+#Logistic Regression model
+logmod <- glm(is_promoted ~ department + log(avg_training_score) + department * avg_training_score, 
+              data = HR.both.train, 
+              family = "binomial")
+
+logmod.pred <- predict(logmod, newdata = HR.both.test3, type = "response") #Get predictions
+
+#Make table with preds
+logtable <- cbind(logmod.pred, HR.both.test3) #Combine columns
+
+logtable <- logtable %>% #Add prediction colum
+  mutate(is_promoted_pred = factor(ifelse(logmod.pred >= 0.7,1,0))) %>%
+  dplyr::select(is_promoted, is_promoted_pred, logmod.pred, everything())
+
+
+logtable2 <- logtable %>% #Adjust predictions
+  mutate(correct_pred = ifelse(is_promoted == is_promoted_pred,1,0)) %>%
+  dplyr::select(correct_pred, everything())
+
+logresults <- logtable2 %>% #Group by correct_pred and is_promoted
+  group_by(correct_pred, is_promoted) %>%
+  summarize(n = n())
+
+#Confusion matrix
+confusionMatrix(logtable$is_promoted_pred, reference = factor(HR.both.test3$is_promoted))
+
+#F1 Score
+precision.l <- posPredValue(logtable$is_promoted_pred, factor(HR.both.test3$is_promoted), positive="1")
+recall.l <- sensitivity(logtable$is_promoted_pred, factor(HR.both.test3$is_promoted), positive="1")
+
+F1.l <- (2 * precision.l * recall.l) / (precision.l + recall.l)
+```
+Logistic undersampled dataset: F1 ~ 0.4742
+Logistic full dataset: F1 ~ 0.4819
+
+###---Tree Based Methods---###
+
+Single Tree - full dataset
+```{r}
+set.seed(273)
+
+#Create train and test sets
+tree.index <- sample(1:nrow(HR), floor(nrow(HR) * 0.7), replace = F)
+tree.train <- HR[tree.index,-c(2,3)]
+tree.test <- HR[-tree.index, -c(2,3)]
+
+#Rename awards variable
+tree.train <- tree.train %>%
+  rename("awards_won" = "awards_won?")
+tree.test <- tree.test %>%
+  rename("awards_won" = "awards_won?")
+
+#Fit tree
+tree.data <- tree(factor(is_promoted) ~ ., data = data.frame(tree.train))
+tree.pred <- predict(tree.data, tree.test[,-1], type = "class")
+
+#Use CV to prune
+tree.cv = cv.tree(tree.data, FUN = prune.misclass)
+plot(tree.cv$size, tree.cv$dev, type = "b")
+tree.table <- as_tibble(cbind(tree.cv$size,tree.cv$dev))
+
+prune.tree = prune.misclass(tree.data, best = tree.table[which.min(tree.table$V2),1])
+tree.pred2 = predict(prune.tree, tree.test, type = "class")
+cv.table <- table(tree.pred, tree.test$is_promoted)
+
+#Calculate F1 score
+precision <- cv.table[4] / (cv.table[4] + cv.table[2])
+recall <- cv.table[4] / (cv.table[4] + cv.table[3])
+F1 = (2*precision*recall) / sum(precision, recall)
+```
+F1 of single tree ~ 0.17 (as expected, quite terrible)
+
+RandomForest - full dataset
+```{r}
+set.seed(273)
+
+#Cannot have 'character' type columns so convert to factors
+HR_rf <- HR %>% mutate_if(is.character, as.factor)
+
+#Fit randomforest and get predictions
+bag.tree = randomForest(factor(is_promoted) ~ ., data = HR_rf[,-c(2)], 
+                        subset = tree.index, 
+                        mtry = 4, 
+                        importance = T, 
+                        na.action = na.exclude)
+bag.pred <- predict(bag.tree, newdata = tree.test)
+
+cv.table.bag <- table(bag.pred, tree.test$is_promoted)
+
+#Calculate F1 score
+precision.bag <- cv.table.bag[4] / (cv.table.bag[4] + cv.table.bag[2])
+recall.bag <- cv.table.bag[4] / (cv.table.bag[4] + cv.table.bag[3])
+F1.bag = (2*precision.bag*recall.bag) / sum(precision.bag, recall.bag)
+
+```
+F1.bag ~ 0.5
+
+Note: 0.02 decrease for gride search over mtry
+
+Boosting - Full dataset
+```{r}
+#Using same train as for random forest
+n.trees = 1000 #Set n.trees
+
+#Create model and get predictions
+boost.tree = gbm(is_promoted ~., 
+                 data = tree.train, 
+                 distribution = "bernoulli", 
+                 n.trees = n.trees, 
+                 shrinkage = 0.1, 
+                 interaction.depth = 9)
+boost.pred <- predict.gbm(boost.tree, newdata = tree.test, n.trees = n.trees, type = "response")
+
+#View results and classify as 1/0
+boost.table <- as.tibble(boost.pred) %>% rename(probabilities = value) %>%
+  mutate(prediction = factor(ifelse(probabilities > 0.5, 1, 0)))
+boost.table$true = tree.test$is_promoted
+cv.table.boost <- confusionMatrix(boost.table$prediction, reference = factor(tree.test$is_promoted))[2] 
+
+#Calculate F1 score
+cv.table.boost <- cv.table.boost[[1]]
+precision.boost <- cv.table.boost[4] / (cv.table.boost[4] + cv.table.boost[2])
+recall.boost <- cv.table.boost[4] / (cv.table.boost[4] + cv.table.boost[3])
+F1.boost = (2*precision.boost*recall.boost) / sum(precision.boost, recall.boost)
+```
+CV and increase # of trees did not alter F1 very much 
+
+###---Tree based methods on undersampled dataset
+
+Basic Tree - Undersampled dataset
+```{r}
+set.seed(273)
+
+#Create tree, predict prune with CV and get F1 score
+utree.data = tree(factor(is_promoted) ~ . -region, data = HR.both.train)
+utree.pred = predict(utree.data, HR.both.test3[,-1], type = "class")
+table(utree.pred, HR.both.test3$is_promoted)
+
+#Use CV to prune
+utree.cv = cv.tree(utree.data, FUN = prune.misclass)
+plot(utree.cv$size, utree.cv$dev, type = "b")
+utree.table <- as.tibble(cbind(utree.cv$size,utree.cv$dev))
+utree.table
+uprune.tree = prune.misclass(utree.data, best = utree.table[which.min(utree.table$V2),1])
+utree.pred2 = predict(uprune.tree, HR.both.test3, type = "class")
+ucv.table <- table(utree.pred, HR.both.test3$is_promoted)
+
+#F1 score
+uprecision <- ucv.table[4] / (ucv.table[4] + ucv.table[2])
+urecall <- ucv.table[4] / (ucv.table[4] + ucv.table[3])
+uF1 = (2*uprecision*urecall) / sum(uprecision, urecall)s
+```
+Single tree: F1 ~ 0.3
+
+RandomForest - Undersampled dataset
+```{r}
+set.seed(273)
+ubag.tree = randomForest(factor(is_promoted) ~ ., data = HR.both, subset = both.sample, mtry = 4, importance = T, na.action = na.exclude)
+ubag.pred <- predict(ubag.tree, newdata = HR.both.test3)
+ucv.table.bag <- table(ubag.pred, HR.both.test3$is_promoted)
+#F1 score
+uprecision.bag <- ucv.table.bag[4] / (ucv.table.bag[4] + ucv.table.bag[2])
+urecall.bag <- ucv.table.bag[4] / (ucv.table.bag[4] + ucv.table.bag[3])
+uF1.bag = (2*uprecision.bag*urecall.bag) / sum(uprecision.bag, urecall.bag)
+
+varImpPlot(ubag.tree, main = "Undersampled Bagging: Variable Influence")
+plot(ubag.tree)
+```
+Random Forest: F1 ~0.43
+
+Boosting - Undersampled dataset
+```{r}
+set.seed(273)
+n.trees = 1000
+head(HR.both.train)
+uboost.tree = gbm(is_promoted ~., data = HR.both.train, distribution = "bernoulli", n.trees = n.trees, shrinkage = 0.1, interaction.depth = 9)
+uboost.pred <- predict.gbm(uboost.tree, newdata = HR.both.test3, n.trees = n.trees, type = "response")
+
+#CV for best threshold value
+thresholds <- seq(from = 0.05, to = 0.95, by = 0.01)
+uboosts <- c()
+
+for(i in 1:length(thresholds)) {
+uboost.table <- as.tibble(uboost.pred) %>% rename(probabilities = value) %>%
+  mutate(prediction = factor(ifelse(probabilities > thresholds[i], 1, 0)))
+uboost.table$true = HR.both.test3$is_promoted
+ucv.table.boost <- confusionMatrix(uboost.table$prediction, reference = factor(HR.both.test3$is_promoted))[2]
+plot(uboost.tree)
+#F1
+ucv.table.boost <- ucv.table.boost[[1]]
+uprecision.boost <- ucv.table.boost[4] / (ucv.table.boost[4] + ucv.table.boost[2])
+urecall.boost <- ucv.table.boost[4] / (ucv.table.boost[4] + ucv.table.boost[3])
+uF1.boost = (2*uprecision.boost*urecall.boost) / sum(uprecision.boost, urecall.boost)
+uboosts[i] <- uF1.boost
+}
+
+best.thresh <- thresholds[which.max(uboosts)]
+max(uboosts)
+```
+XGB F1 ~0.42
+
+So best threshold value is at thresholds[14] = 0.18
+
+###---Analyzing by department---###
+
+Splitting by department
+```{r}
+deps <- levels(HR$department)
+hr.dep <- list()
+for(i in 1:length(deps)) {
+  hr.dep[[i]] <- HR[HR$department == deps[i],]
+}
+```
+
+Function to fit basic tree, bag, boost, and logistic by department (get.trees)
+```{r}
+listy <- list()
+get.trees <- function(data, n.trees, seed) {
+  set.seed(seed)
+  index <- sample(nrow(data), floor(0.5 * nrow(data)), replace = F)
+  train <- data[index,]
+  test <- data[-index,]
+  #Get basic tree
+basic.tree = tree(factor(is_promoted) ~ . -region, data = train)
+basic.pred = predict(basic.tree, newdata = test[,-1], type = "class")
+
+#Use CV to prune
+basic.cv = cv.tree(basic.tree, FUN = prune.misclass)
+basic.table <- as.tibble(cbind(basic.cv$size,basic.cv$dev))
+basic.prune.tree = prune.misclass(basic.tree, best = basic.table[which.min(basic.table$V2),1])
+listy[[1]] <- basic.prune.tree
+
+  #Get bagged tree
+bagg.tree = randomForest(factor(is_promoted) ~ ., data = data, subset = index, mtry = 10, importance = T, na.action = na.exclude)
+listy[[2]] <- bagg.tree
+    #Get boosted tree
+boost.tree = gbm(is_promoted ~., data = train, distribution = "bernoulli", n.trees = n.trees, shrinkage = 0.1, interaction.depth = 9)
+listy[[3]] <- boost.tree
+listy
+}
+```
+
+Function to get F1 scores for each model, for each department
+```{r}
+f1s <- c()
+get.f1 <- function(data, n.trees, seed) {
+  set.seed(seed)
+  index <- sample(nrow(data), floor(0.5 * nrow(data)), replace = F)
+  train <- data[index,]
+  test <- data[-index,]
+  #Get basic tree
+basic.tree = tree(factor(is_promoted) ~ . -region, data = train)
+basic.pred = predict(basic.tree, newdata = test[,-1], type = "class")
+basic.cv = cv.tree(basic.tree, FUN = prune.misclass)
+basic.table <- as.tibble(cbind(basic.cv$size,basic.cv$dev))
+basic.prune.tree = prune.misclass(basic.tree, best = basic.table[which.min(basic.table$V2),1])
+basic.pred2 = predict(basic.prune.tree, test, type = "class")
+basic.cv.table <- table(basic.pred2, test$is_promoted)
+#F1 score
+uprecision <- basic.cv.table[4] / (basic.cv.table[4] + basic.cv.table[2])
+urecall <- basic.cv.table[4] / (basic.cv.table[4] + basic.cv.table[3])
+basic.F1 = (2*uprecision*urecall) / sum(uprecision, urecall)
+f1s[1] <- basic.F1
+
+
+  #Get bagged tree
+bagg.tree = randomForest(factor(is_promoted) ~ ., data = data, subset = index, mtry = 10, importance = T, na.action = na.exclude)
+bagg.pred <- predict(bagg.tree, newdata = test)
+ucv.table.bagg <- table(bagg.pred, test$is_promoted)
+#F1 score
+uprecision.bag <- ucv.table.bagg[4] / (ucv.table.bagg[4] + ucv.table.bagg[2])
+urecall.bag <- ucv.table.bagg[4] / (ucv.table.bagg[4] + ucv.table.bagg[3])
+F1.bag = (2*uprecision.bag*urecall.bag) / sum(uprecision.bag, urecall.bag)
+f1s[2] <- F1.bag
+
+    #Get boosted tree
+uboost.tree = gbm(is_promoted ~., data = train, distribution = "bernoulli", n.trees = n.trees, shrinkage = 0.1, interaction.depth = 9)
+uboost.pred <- predict.gbm(uboost.tree, newdata = test, n.trees = n.trees, type = "response")
+
+#CV for best threshold value
+thresholds <- seq(from = 0.005, to = 0.99, by = 0.05)
+uboosts <- c()
+
+#for(i in 1:length(thresholds)) {
+uboost.table <- as.tibble(uboost.pred) %>% rename(probabilities = value) %>%
+  mutate(prediction = factor(ifelse(probabilities > 0.505, 1, 0)))
+uboost.table$true = test$is_promoted
+ucv.table.boost <- confusionMatrix(uboost.table$prediction, reference = factor(test$is_promoted))[2]
+
+#F1
+ucv.table.boost <- ucv.table.boost[[1]]
+uprecision.boost <- ucv.table.boost[4] / (ucv.table.boost[4] + ucv.table.boost[2])
+urecall.boost <- ucv.table.boost[4] / (ucv.table.boost[4] + ucv.table.boost[3])
+uF1.boost = (2*uprecision.boost*urecall.boost) / sum(uprecision.boost, urecall.boost)
+#uboosts[i] <- uF1.boost
+f1s[3] <- uF1.boost
+#}
+#best.thresh <- thresholds[which.max(uboosts)]
+#f1s[3] <- max(uboosts)
+f1s
+}
+```
+
+Loop through departments and get models and f1s
+```{r, message = F}
+dep.models <- list()
+dep.f1 <- matrix(nrow = 9, ncol = 3)
+rownames(dep.f1) <- deps
+colnames(dep.f1) <- c("Single Tree", "Bagging", "Boosting")
+for(i in 1:length(hr.dep)) {
+  dep.models[[i]] <- get.trees(hr.dep[[i]], n.trees = 3, seed = 273)
+  dep.f1[i,] <- round(get.f1(hr.dep[[i]][,names(hr.dep[[i]])!='department'], n.trees = 3, seed = 273), 3)
+}
+dep.f1
+hold6 <- dep.f1[,3]
+```
